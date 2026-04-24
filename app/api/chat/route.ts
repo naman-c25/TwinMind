@@ -1,6 +1,8 @@
 import { NextRequest } from 'next/server';
 import Groq from 'groq-sdk';
 
+export const maxDuration = 30; // streaming responses need enough headroom
+
 interface ChatHistoryItem {
   role: 'user' | 'assistant';
   content: string;

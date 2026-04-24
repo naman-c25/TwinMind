@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 
+export const maxDuration = 30; // seconds — Whisper on long audio can be slow
+
 // Whisper hallucinates these strings on silence — filter them out
 const HALLUCINATIONS = new Set([
   'thank you.',

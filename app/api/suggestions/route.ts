@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import Groq from 'groq-sdk';
 import { Suggestion } from '@/lib/types';
 
+export const maxDuration = 20;
+
 function parseSuggestions(raw: string): Suggestion[] {
   // Strip markdown code fences if the model wraps the JSON
   const cleaned = raw
