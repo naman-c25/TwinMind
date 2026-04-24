@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    @apply text-slate-900;
+  }
+}
+
+/* TwinMind-style gradient background — matches their sky/mountain aesthetic */
+.landing-bg {
+  background: linear-gradient(
+    160deg,
+    #7fb5cc 0%,
+    #9ec4d4 18%,
+    #aecdd9 35%,
+    #bed4d8 50%,
+    #cad5d4 65%,
+    #d2cfc4 80%,
+    #d8c9b2 100%
+  );
+  position: relative;
+  overflow: hidden;
+}
+
+@layer utilities {
+  /* Navy color palette */
+  .text-navy-900  { color: #0B2D4E; }
+  .bg-navy-900    { background-color: #0B2D4E; }
+  .bg-navy-800    { background-color: #0f3a62; }
+  .bg-navy-700    { background-color: #1a4a6e; }
+  .hover\:bg-navy-800:hover { background-color: #0f3a62; }
+  .hover\:bg-navy-700:hover { background-color: #1a4a6e; }
+  .border-navy-500 { border-color: #2d6a9f; }
+
+  /* Focus ring for chat input */
+  .focus-within\:border-navy-500:focus-within { border-color: #2d6a9f; }
+  .focus-within\:ring-1:focus-within {
+    --tw-ring-shadow: var(--tw-ring-inset) 0 0 0 1px var(--tw-ring-color);
+    box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000),
+      var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow, 0 0 #0000);
+  }
+  .focus-within\:ring-navy-500\/20:focus-within {
+    --tw-ring-color: rgb(45 106 159 / 0.2);
+  }
+  .ring-navy-500\/20 {
+    --tw-ring-color: rgb(45 106 159 / 0.2);
+  }
+
+  /* Text clamp */
+  .line-clamp-3 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  /* Recording pulse */
+  .animate-pulse-slow {
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+}
