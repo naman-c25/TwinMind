@@ -25,6 +25,8 @@ export default function Home() {
   const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nextChunkIn, setNextChunkIn] = useState<number | null>(null);
+  const [exportDone, setExportDone] = useState(false);
 
   const [transcriptChunks, setTranscriptChunks] = useState<TranscriptChunk[]>([]);
   const [suggestionBatches, setSuggestionBatches] = useState<SuggestionBatch[]>([]);
@@ -45,9 +47,13 @@ export default function Home() {
   const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Abort controller for the active chat stream — cancelled on unmount
   const chatAbortRef = useRef<AbortController | null>(null);
+  // Tracks when the current chunk timer started and its duration, for the countdown display
+  const chunkScheduledAtRef = useRef<{ at: number; ms: number } | null>(null);
 
+  const chatMessagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => { transcriptChunksRef.current = transcriptChunks; }, [transcriptChunks]);
   useEffect(() => { latestBatchRef.current = suggestionBatches[0] ?? null; }, [suggestionBatches]);
+  useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
 
   useEffect(() => {
     const s = loadSettings();
@@ -178,17 +184,31 @@ export default function Home() {
     if (isRecordingRef.current) startNewRecorder();
   }, [transcribeBlob, generateSuggestions, startNewRecorder]);
 
-  // Recursive setTimeout — the 30s window begins AFTER the previous chunk finishes processing.
-  // setInterval would tick while transcription is still running, shortening audio chunks.
-  const scheduleNextChunk = useCallback(() => {
+  // Recursive setTimeout — the window begins AFTER the previous chunk finishes processing.
+  // firstChunk=true uses a 15 s window so initial suggestions arrive in ~20 s instead of ~35 s.
+  const scheduleNextChunk = useCallback((firstChunk = false) => {
     if (!isRecordingRef.current) return;
-    const ms = (settingsRef.current?.autoRefreshInterval ?? 30) * 1000;
+    const ms = firstChunk ? 15_000 : (settingsRef.current?.autoRefreshInterval ?? 30) * 1000;
+    chunkScheduledAtRef.current = { at: Date.now(), ms };
     chunkTimerRef.current = setTimeout(async () => {
       if (!isRecordingRef.current) return;
+      chunkScheduledAtRef.current = null;
       await processChunk();
-      scheduleNextChunk(); // schedule next only after this one fully completes
+      scheduleNextChunk();
     }, ms);
   }, [processChunk]);
+
+  // Countdown ticker — updates nextChunkIn every 500 ms while recording
+  useEffect(() => {
+    if (!isRecording) { setNextChunkIn(null); return; }
+    const id = setInterval(() => {
+      const sched = chunkScheduledAtRef.current;
+      if (!sched) { setNextChunkIn(null); return; }
+      const remaining = Math.ceil((sched.at + sched.ms - Date.now()) / 1000);
+      setNextChunkIn(remaining > 0 ? remaining : 0);
+    }, 500);
+    return () => clearInterval(id);
+  }, [isRecording]);
 
   // ── Recording controls ────────────────────────────────────────────────────
 
@@ -214,7 +234,7 @@ export default function Home() {
       setIsRecording(true);
       setHasStarted(true);
       startNewRecorder();
-      scheduleNextChunk(); // kicks off the recursive 30s cycle
+      scheduleNextChunk(true); // first chunk is 15 s for faster initial suggestions
     } catch {
       setError('Microphone access denied. Please allow microphone access in your browser and try again.');
     }
@@ -290,48 +310,49 @@ export default function Home() {
       apiUserMessage = userContent;
     }
 
-    setChatMessages((prev) => {
-      const history = prev.filter((m) => m.id !== assistantId).slice(-12).map((m) => ({ role: m.role, content: m.content }));
-      chatAbortRef.current?.abort();
-      const abort = new AbortController();
-      chatAbortRef.current = abort;
-      (async () => {
-        try {
-          const res = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ systemPrompt, userMessage: apiUserMessage, chatHistory: history, apiKey, model }),
-            signal: abort.signal,
-          });
-          if (!res.ok || !res.body) throw new Error(`Chat error ${res.status}`);
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let accumulated = '';
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            for (const line of decoder.decode(value, { stream: true }).split('\n')) {
-              if (!line.startsWith('data: ')) continue;
-              const payload = line.slice(6).trim();
-              if (payload === '[DONE]') break;
-              try {
-                const { text } = JSON.parse(payload) as { text: string };
-                if (text) {
-                  accumulated += text;
-                  setChatMessages((p) => p.map((m) => m.id === assistantId ? { ...m, content: accumulated } : m));
-                }
-              } catch { /* partial line */ }
-            }
+    // Read latest messages via ref — avoids stale closure without nesting fetch in a state updater
+    const history = chatMessagesRef.current
+      .filter((m) => m.id !== assistantId)
+      .slice(-12)
+      .map((m) => ({ role: m.role, content: m.content }));
+    chatAbortRef.current?.abort();
+    const abort = new AbortController();
+    chatAbortRef.current = abort;
+    (async () => {
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ systemPrompt, userMessage: apiUserMessage, chatHistory: history, apiKey, model }),
+          signal: abort.signal,
+        });
+        if (!res.ok || !res.body) throw new Error(`Chat error ${res.status}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let accumulated = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          for (const line of decoder.decode(value, { stream: true }).split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') break;
+            try {
+              const { text } = JSON.parse(payload) as { text: string };
+              if (text) {
+                accumulated += text;
+                setChatMessages((p) => p.map((m) => m.id === assistantId ? { ...m, content: accumulated } : m));
+              }
+            } catch { /* partial line */ }
           }
-        } catch (err) {
-          // AbortError means the component unmounted or a new message was sent — not a real error
-          if ((err as Error).name !== 'AbortError') {
-            setChatMessages((p) => p.map((m) => m.id === assistantId ? { ...m, content: `Error: ${(err as Error).message}` } : m));
-          }
-        } finally { setIsChatLoading(false); }
-      })();
-      return prev;
-    });
+        }
+      } catch (err) {
+        // AbortError means the component unmounted or a new message was sent — not a real error
+        if ((err as Error).name !== 'AbortError') {
+          setChatMessages((p) => p.map((m) => m.id === assistantId ? { ...m, content: `Error: ${(err as Error).message}` } : m));
+        }
+      } finally { setIsChatLoading(false); }
+    })();
   }, []);
 
   const handleSuggestionClick = useCallback((s: Suggestion) => {
@@ -492,11 +513,16 @@ export default function Home() {
           </button>
 
           <button
-            onClick={() => exportSession(transcriptChunks, suggestionBatches, chatMessages, sessionStartRef.current)}
+            onClick={() => {
+              exportSession(transcriptChunks, suggestionBatches, chatMessages, sessionStartRef.current);
+              setExportDone(true);
+              setTimeout(() => setExportDone(false), 1500);
+            }}
             disabled={transcriptChunks.length === 0 && chatMessages.length === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-white/70 hover:text-white hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
           >
-            <ExportIcon className="w-3.5 h-3.5" />Export
+            <ExportIcon className="w-3.5 h-3.5" />
+            {exportDone ? 'Downloaded ✓' : 'Export'}
           </button>
 
           <Link href="/settings" className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium text-white/70 hover:text-white hover:bg-white/10 transition-all">
@@ -514,6 +540,8 @@ export default function Home() {
           <SuggestionsPanel
             batches={suggestionBatches}
             isGenerating={isGeneratingSuggestions}
+            isRecording={isRecording}
+            nextChunkIn={nextChunkIn}
             onSuggestionClick={handleSuggestionClick}
             onManualRefresh={handleManualRefresh}
             hasTranscript={transcriptChunks.length > 0}

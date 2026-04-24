@@ -7,6 +7,8 @@ import SuggestionCard from './SuggestionCard';
 interface Props {
   batches: SuggestionBatch[];
   isGenerating: boolean;
+  isRecording: boolean;
+  nextChunkIn: number | null;
   onSuggestionClick: (suggestion: Suggestion) => void;
   onManualRefresh: () => void;
   hasTranscript: boolean;
@@ -19,6 +21,8 @@ function formatBatchTime(iso: string): string {
 export default function SuggestionsPanel({
   batches,
   isGenerating,
+  isRecording,
+  nextChunkIn,
   onSuggestionClick,
   onManualRefresh,
   hasTranscript,
@@ -41,6 +45,12 @@ export default function SuggestionsPanel({
           <span className="text-sm font-semibold text-navy-900">Live Suggestions</span>
           {batches.length > 0 && (
             <span className="text-xs text-slate-400">{batches.length} batch{batches.length !== 1 ? 'es' : ''}</span>
+          )}
+          {/* Countdown chip — shows how long until the next auto-refresh */}
+          {isRecording && !isGenerating && nextChunkIn !== null && nextChunkIn > 0 && (
+            <span className="text-[10px] font-mono text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+              ↻ {nextChunkIn}s
+            </span>
           )}
         </div>
         <button
@@ -100,12 +110,21 @@ export default function SuggestionsPanel({
             <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">
               <SparklesIcon className="w-5 h-5 text-slate-400" />
             </div>
-            <p className="text-sm text-slate-400 font-medium">Suggestions appear here</p>
-            <p className="text-xs text-slate-300 mt-1">
-              {hasTranscript
-                ? 'Press Refresh to generate suggestions'
-                : 'Start recording to get live suggestions'}
-            </p>
+            {isRecording && nextChunkIn !== null ? (
+              <>
+                <p className="text-sm text-slate-500 font-medium">Listening…</p>
+                <p className="text-xs text-slate-400 mt-1">
+                  First suggestions in <span className="font-mono font-semibold">{nextChunkIn}s</span>
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-slate-400 font-medium">Suggestions appear here</p>
+                <p className="text-xs text-slate-300 mt-1">
+                  {hasTranscript ? 'Press Refresh to generate suggestions' : 'Start recording to get live suggestions'}
+                </p>
+              </>
+            )}
           </div>
         )}
       </div>
