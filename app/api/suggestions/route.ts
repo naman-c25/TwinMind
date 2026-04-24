@@ -51,23 +51,37 @@ export async function POST(req: NextRequest) {
       apiKey: string;
       model: string;
       prompt: string;
+      previousTitles?: string[];
     };
 
     // User's key from Settings takes priority; fall back to server env var
     const apiKey = body.apiKey || process.env.GROQ_API_KEY || null;
     const model = body.model || process.env.GROQ_LLM_MODEL || 'llama-3.3-70b-versatile';
-    const { transcript, prompt } = body;
+    const { transcript, prompt, previousTitles } = body;
     if (!apiKey) return NextResponse.json({ error: 'No Groq API key — add one in Settings or set GROQ_API_KEY in .env.local' }, { status: 401 });
     if (!transcript?.trim()) return NextResponse.json({ suggestions: [] });
 
     const groq = new Groq({ apiKey });
-    const filledPrompt = prompt.replace('{transcript}', transcript);
+    // Split instructions (system) from data (user) for cleaner instruction-following
+    const [instructionsPart, transcriptLabel] = prompt.split('{transcript}');
+    const systemInstructions = instructionsPart.trim();
+
+    let userContent = transcript;
+    if (transcriptLabel?.trim()) userContent = `${transcriptLabel.trim()}\n${transcript}`;
+
+    // Inject anti-repetition constraint so the model doesn't resurface the same suggestions
+    if (previousTitles && previousTitles.length > 0) {
+      userContent += `\n\nDo NOT repeat or rephrase any of these suggestions from the previous refresh:\n${previousTitles.map((t) => `- ${t}`).join('\n')}`;
+    }
 
     const completion = await groq.chat.completions.create({
-      messages: [{ role: 'user', content: filledPrompt }],
+      messages: [
+        { role: 'system', content: systemInstructions },
+        { role: 'user', content: userContent },
+      ],
       model,
       temperature: 0.65,
-      max_tokens: 900,
+      max_tokens: 1024,
     });
 
     const content = completion.choices[0]?.message?.content ?? '[]';

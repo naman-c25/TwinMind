@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useRef } from 'react';
 import { SuggestionBatch, Suggestion } from '@/lib/types';
 import SuggestionCard from './SuggestionCard';
 
@@ -22,6 +23,16 @@ export default function SuggestionsPanel({
   onManualRefresh,
   hasTranscript,
 }: Props) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const latestBatchId = batches[0]?.id;
+
+  // Scroll to top whenever a new batch lands so the user always sees the freshest suggestions
+  useEffect(() => {
+    if (latestBatchId) {
+      scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [latestBatchId]);
+
   return (
     <div className="flex flex-col h-full bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
       {/* Header */}
@@ -44,7 +55,7 @@ export default function SuggestionsPanel({
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
         {/* Generating skeleton */}
         {isGenerating && (
           <div className="space-y-2">

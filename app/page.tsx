@@ -9,11 +9,14 @@ import ChatPanel from '@/components/ChatPanel';
 import { AppSettings, ChatMessage, Suggestion, SuggestionBatch, TranscriptChunk } from '@/lib/types';
 import { loadSettings } from '@/lib/settings';
 import { exportSession } from '@/lib/exportSession';
+import { buildTranscriptContext } from '@/lib/buildContext';
+import { MicIcon, KeyIcon, ExportIcon, GearIcon } from '@/components/Icons';
 
 export default function Home() {
   const router = useRouter();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
+  const serverHasKeyRef = useRef(false); // true when GROQ_API_KEY is set in .env
 
   // Session state
   const [hasStarted, setHasStarted] = useState(false);
@@ -31,21 +34,34 @@ export default function Home() {
   // Refs — always up-to-date values for use in callbacks
   const settingsRef = useRef<AppSettings | null>(null);
   const transcriptChunksRef = useRef<TranscriptChunk[]>([]);
+  const latestBatchRef = useRef<SuggestionBatch | null>(null);
   const isRecordingRef = useRef(false);
   const sessionStartRef = useRef(new Date().toISOString());
 
   // Recording refs
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // setTimeout handle — recursive so each 30s window starts AFTER processing finishes
+  const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Abort controller for the active chat stream — cancelled on unmount
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => { transcriptChunksRef.current = transcriptChunks; }, [transcriptChunks]);
+  useEffect(() => { latestBatchRef.current = suggestionBatches[0] ?? null; }, [suggestionBatches]);
 
   useEffect(() => {
     const s = loadSettings();
     settingsRef.current = s;
     setSettings(s);
     setHasApiKey(!!s.groqApiKey);
+    // Check if the server has a key in .env so we don't block recording unnecessarily
+    fetch('/api/health')
+      .then((r) => r.json())
+      .then(({ hasKey }: { hasKey: boolean }) => {
+        serverHasKeyRef.current = hasKey;
+        if (hasKey) setHasApiKey(true);
+      })
+      .catch(() => {});
   }, []);
 
   // ── Audio helpers ─────────────────────────────────────────────────────────
@@ -55,8 +71,11 @@ export default function Home() {
       const recorder = recorderRef.current;
       if (!recorder || recorder.state !== 'recording') { resolve(null); return; }
       const blobs: Blob[] = [];
+      // Safety timeout: if onstop never fires (browser bug), don't block the pipeline
+      const timeout = setTimeout(() => resolve(null), 5000);
       recorder.ondataavailable = (e) => { if (e.data.size > 0) blobs.push(e.data); };
       recorder.onstop = () => {
+        clearTimeout(timeout);
         const blob = new Blob(blobs, { type: recorder.mimeType || 'audio/webm' });
         resolve(blob.size > 1500 ? blob : null);
       };
@@ -77,13 +96,14 @@ export default function Home() {
 
   const transcribeBlob = useCallback(async (blob: Blob): Promise<string> => {
     const s = settingsRef.current;
-    if (!s?.groqApiKey) return '';
+    // Allow request even if localStorage key is empty — server may have GROQ_API_KEY in .env
+    if (!s?.groqApiKey && !serverHasKeyRef.current) return '';
     setIsTranscribing(true);
     try {
       const fd = new FormData();
       fd.append('audio', blob, 'audio.webm');
-      fd.append('apiKey', s.groqApiKey);
-      fd.append('model', s.transcriptionModel);
+      fd.append('apiKey', s?.groqApiKey ?? '');
+      fd.append('model', s?.transcriptionModel ?? 'whisper-large-v3');
       const res = await fetch('/api/transcribe', { method: 'POST', body: fd });
       if (!res.ok) throw new Error(`Transcription error ${res.status}`);
       const data = await res.json() as { text?: string; error?: string };
@@ -97,35 +117,47 @@ export default function Home() {
     }
   }, []);
 
+  const isGeneratingRef = useRef(false); // guard against concurrent generation calls
+
   const generateSuggestions = useCallback(async (chunks: TranscriptChunk[]) => {
     const s = settingsRef.current;
-    if (!s?.groqApiKey || chunks.length === 0) return;
-    const fullText = chunks.map((c) => c.text).join(' ');
-    const words = fullText.split(/\s+/).filter(Boolean);
-    if (words.length < 15) return;
-    const contextText = words.slice(-s.suggestionContextWords).join(' ');
+    if ((!s?.groqApiKey && !serverHasKeyRef.current) || chunks.length === 0) return;
+    // Prevent race: auto-refresh + manual refresh firing simultaneously
+    if (isGeneratingRef.current) return;
+    const totalWords = chunks.reduce((n, c) => n + c.text.split(/\s+/).filter(Boolean).length, 0);
+    if (totalWords < 30) return;
+    const contextText = buildTranscriptContext(chunks, s?.suggestionContextWords ?? 500);
+    isGeneratingRef.current = true;
     setIsGeneratingSuggestions(true);
     try {
       const res = await fetch('/api/suggestions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: contextText, apiKey: s.groqApiKey, model: s.model, prompt: s.suggestionPrompt }),
+        body: JSON.stringify({
+          transcript: contextText,
+          apiKey: s?.groqApiKey ?? '',
+          model: s?.model ?? '',
+          prompt: s?.suggestionPrompt ?? '',
+          previousTitles: latestBatchRef.current?.suggestions.map((sg) => sg.title) ?? [],
+        }),
       });
       if (!res.ok) throw new Error(`Suggestions error ${res.status}`);
       const data = await res.json() as { suggestions?: Suggestion[]; error?: string };
       if (data.error) throw new Error(data.error);
-      if (data.suggestions && data.suggestions.length > 0) {
+      // Require exactly 3 — a partial batch would break the "exactly 3" requirement
+      if (data.suggestions && data.suggestions.length === 3) {
         const batch: SuggestionBatch = {
           id: crypto.randomUUID(),
           suggestions: data.suggestions,
           timestamp: new Date().toISOString(),
           transcriptSnapshot: contextText,
         };
-        setSuggestionBatches((prev) => [batch, ...prev].slice(0, s.maxSuggestionBatches));
+        setSuggestionBatches((prev) => [batch, ...prev].slice(0, s?.maxSuggestionBatches ?? 20));
       }
     } catch (err) {
       setError((err as Error).message);
     } finally {
+      isGeneratingRef.current = false;
       setIsGeneratingSuggestions(false);
     }
   }, []);
@@ -142,24 +174,47 @@ export default function Home() {
         return updated;
       });
     }
+    // Restart recorder AFTER processing completes so each audio chunk is a full 30s window
     if (isRecordingRef.current) startNewRecorder();
   }, [transcribeBlob, generateSuggestions, startNewRecorder]);
+
+  // Recursive setTimeout — the 30s window begins AFTER the previous chunk finishes processing.
+  // setInterval would tick while transcription is still running, shortening audio chunks.
+  const scheduleNextChunk = useCallback(() => {
+    if (!isRecordingRef.current) return;
+    const ms = (settingsRef.current?.autoRefreshInterval ?? 30) * 1000;
+    chunkTimerRef.current = setTimeout(async () => {
+      if (!isRecordingRef.current) return;
+      await processChunk();
+      scheduleNextChunk(); // schedule next only after this one fully completes
+    }, ms);
+  }, [processChunk]);
 
   // ── Recording controls ────────────────────────────────────────────────────
 
   const startRecording = async () => {
     const s = settingsRef.current;
-    if (!s?.groqApiKey) { router.push('/settings'); return; }
+    if (!s?.groqApiKey && !serverHasKeyRef.current) { router.push('/settings'); return; }
     setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       streamRef.current = stream;
+
+      // Detect mic disconnection mid-session
+      stream.getTracks().forEach((track) => {
+        track.onended = () => {
+          if (isRecordingRef.current) {
+            setError('Microphone disconnected. Please check your mic and start recording again.');
+            stopRecording();
+          }
+        };
+      });
+
       isRecordingRef.current = true;
       setIsRecording(true);
       setHasStarted(true);
       startNewRecorder();
-      const ms = (s.autoRefreshInterval ?? 30) * 1000;
-      intervalRef.current = setInterval(processChunk, ms);
+      scheduleNextChunk(); // kicks off the recursive 30s cycle
     } catch {
       setError('Microphone access denied. Please allow microphone access in your browser and try again.');
     }
@@ -167,7 +222,8 @@ export default function Home() {
 
   const stopRecording = async () => {
     isRecordingRef.current = false;
-    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+    if (chunkTimerRef.current) { clearTimeout(chunkTimerRef.current); chunkTimerRef.current = null; }
+    // Process whatever audio was captured in the current (incomplete) chunk
     const blob = await stopRecorderAndGetBlob();
     if (blob) {
       const text = await transcribeBlob(blob);
@@ -188,10 +244,10 @@ export default function Home() {
 
   const handleManualRefresh = async () => {
     if (isRecording) {
-      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
+      // Cancel the pending timer, process current chunk now, then reschedule
+      if (chunkTimerRef.current) { clearTimeout(chunkTimerRef.current); chunkTimerRef.current = null; }
       await processChunk();
-      const ms = (settingsRef.current?.autoRefreshInterval ?? 30) * 1000;
-      intervalRef.current = setInterval(processChunk, ms);
+      scheduleNextChunk();
     } else {
       await generateSuggestions(transcriptChunksRef.current);
     }
@@ -201,7 +257,7 @@ export default function Home() {
 
   const sendChatMessage = useCallback(async (userContent: string, fromSuggestion?: Suggestion) => {
     const s = settingsRef.current;
-    if (!s?.groqApiKey || !userContent.trim()) return;
+    if ((!s?.groqApiKey && !serverHasKeyRef.current) || !userContent.trim()) return;
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(), role: 'user', content: userContent,
@@ -214,30 +270,38 @@ export default function Home() {
     setChatMessages((prev) => [...prev, userMsg, assistantMsg]);
     setIsChatLoading(true);
 
-    const fullText = transcriptChunksRef.current.map((c) => c.text).join(' ');
-    const transcriptContext = fullText.split(/\s+/).filter(Boolean).slice(-s.chatContextWords).join(' ');
+    const contextLimit = fromSuggestion
+      ? (s?.detailedAnswerContextWords ?? 2000)
+      : (s?.chatContextWords ?? 1000);
+    const transcriptContext = buildTranscriptContext(transcriptChunksRef.current, contextLimit);
 
     let systemPrompt: string;
     let apiUserMessage: string;
+    const apiKey = s?.groqApiKey ?? '';
+    const model = s?.model ?? '';
     if (fromSuggestion) {
-      systemPrompt = s.detailedAnswerPrompt
+      systemPrompt = (s?.detailedAnswerPrompt ?? '')
         .replace('{transcript}', transcriptContext)
         .replace('{suggestion_title}', fromSuggestion.title)
         .replace('{suggestion_preview}', fromSuggestion.preview);
-      apiUserMessage = `Please provide a detailed explanation of: ${fromSuggestion.title}`;
+      apiUserMessage = fromSuggestion.title;
     } else {
-      systemPrompt = s.chatSystemPrompt.replace('{transcript}', transcriptContext);
+      systemPrompt = (s?.chatSystemPrompt ?? '').replace('{transcript}', transcriptContext);
       apiUserMessage = userContent;
     }
 
     setChatMessages((prev) => {
       const history = prev.filter((m) => m.id !== assistantId).slice(-12).map((m) => ({ role: m.role, content: m.content }));
+      chatAbortRef.current?.abort();
+      const abort = new AbortController();
+      chatAbortRef.current = abort;
       (async () => {
         try {
           const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ systemPrompt, userMessage: apiUserMessage, chatHistory: history, apiKey: s.groqApiKey, model: s.model }),
+            body: JSON.stringify({ systemPrompt, userMessage: apiUserMessage, chatHistory: history, apiKey, model }),
+            signal: abort.signal,
           });
           if (!res.ok || !res.body) throw new Error(`Chat error ${res.status}`);
           const reader = res.body.getReader();
@@ -260,7 +324,10 @@ export default function Home() {
             }
           }
         } catch (err) {
-          setChatMessages((p) => p.map((m) => m.id === assistantId ? { ...m, content: `Error: ${(err as Error).message}` } : m));
+          // AbortError means the component unmounted or a new message was sent — not a real error
+          if ((err as Error).name !== 'AbortError') {
+            setChatMessages((p) => p.map((m) => m.id === assistantId ? { ...m, content: `Error: ${(err as Error).message}` } : m));
+          }
         } finally { setIsChatLoading(false); }
       })();
       return prev;
@@ -268,14 +335,19 @@ export default function Home() {
   }, []);
 
   const handleSuggestionClick = useCallback((s: Suggestion) => {
-    setPendingSuggestion(null);
-    setHasStarted(true);
+    setPendingSuggestion(s);
     sendChatMessage(s.title, s);
   }, [sendChatMessage]);
 
+  // Clear the pending-suggestion pill once the chat response finishes streaming
+  useEffect(() => {
+    if (!isChatLoading) setPendingSuggestion(null);
+  }, [isChatLoading]);
+
   useEffect(() => () => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
+    if (chunkTimerRef.current) clearTimeout(chunkTimerRef.current);
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    chatAbortRef.current?.abort();
   }, []);
 
   // ── LANDING PAGE ──────────────────────────────────────────────────────────
@@ -461,7 +533,7 @@ export default function Home() {
   );
 }
 
-// ── Helper components ─────────────────────────────────────────────────────────
+// ── Landing-page helpers ──────────────────────────────────────────────────────
 
 function Step({ icon, label }: { icon: string; label: string }) {
   return (
@@ -474,39 +546,4 @@ function Step({ icon, label }: { icon: string; label: string }) {
 
 function Arrow() {
   return <span className="text-navy-900/30 text-lg">→</span>;
-}
-
-// ── Icons ─────────────────────────────────────────────────────────────────────
-
-function MicIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
-    </svg>
-  );
-}
-
-function KeyIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
-    </svg>
-  );
-}
-
-function ExportIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-    </svg>
-  );
-}
-
-function GearIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-    </svg>
-  );
 }

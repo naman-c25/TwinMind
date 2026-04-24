@@ -43,6 +43,7 @@ export interface AppSettings {
   detailedAnswerPrompt: string;
   chatSystemPrompt: string;
   suggestionContextWords: number;
+  detailedAnswerContextWords: number;
   chatContextWords: number;
   autoRefreshInterval: number; // seconds
   maxSuggestionBatches: number;

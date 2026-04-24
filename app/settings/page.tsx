@@ -130,7 +130,7 @@ export default function SettingsPage() {
 
         {/* ── Timing & Context ── */}
         <Section title="Timing & Context" description="Control when suggestions refresh and how much transcript context is fed to each prompt.">
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 gap-4">
             <Field label="Auto-refresh interval" hint="Seconds between automatic suggestion refreshes">
               <div className="flex items-center gap-2">
                 <input
@@ -145,7 +145,7 @@ export default function SettingsPage() {
               </div>
             </Field>
 
-            <Field label="Suggestion context" hint="Words of transcript sent to the suggestion prompt">
+            <Field label="Suggestion context" hint="Words of transcript sent to the live suggestion prompt">
               <div className="flex items-center gap-2">
                 <input
                   type="number"
@@ -160,7 +160,22 @@ export default function SettingsPage() {
               </div>
             </Field>
 
-            <Field label="Chat context" hint="Words of transcript available to chat & detailed answers">
+            <Field label="Expanded answer context" hint="Words of transcript sent when a suggestion card is clicked">
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={200}
+                  max={8000}
+                  step={100}
+                  value={form.detailedAnswerContextWords}
+                  onChange={(e) => update('detailedAnswerContextWords', Number(e.target.value))}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-navy-500/30 focus:border-navy-500"
+                />
+                <span className="text-xs text-slate-400 whitespace-nowrap">words</span>
+              </div>
+            </Field>
+
+            <Field label="Chat context" hint="Words of transcript available to free-form chat questions">
               <div className="flex items-center gap-2">
                 <input
                   type="number"

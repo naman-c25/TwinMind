@@ -69,8 +69,8 @@ export default function SuggestionCard({ suggestion, onClick }: Props) {
         {suggestion.title}
       </p>
 
-      {/* Preview — standalone value */}
-      <p className="text-xs text-slate-500 leading-relaxed line-clamp-3">
+      {/* Preview — full text shown; prompt enforces 1-2 sentences so it never overflows */}
+      <p className="text-xs text-slate-500 leading-relaxed">
         {suggestion.preview}
       </p>
 
